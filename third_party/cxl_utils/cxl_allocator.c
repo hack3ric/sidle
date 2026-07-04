@@ -20,7 +20,8 @@ static const char *path = "/dev/dax0.0";
 static int percentage_on_cxl;
 static char *mmap_start_point = NULL;
 static char *mmap_end_point = NULL;
-static int cxl_fd = 0;
+static int cxl_fd = -1;
+static int cxl_initialized = 0;
 static atomic_size_t cxl_offset = CXL_MAX_SIZE;
 static size_t CXL_MIN_SIZE = 2 * 1024 * 1024;
 static int local_stride;
@@ -51,19 +52,30 @@ int gcd(int a, int b) {
 }
 
 void exit_handler(int singal_num) {
+    (void)singal_num;
     if (cxl_kind != NULL) {
         int err = memkind_destroy_kind(cxl_kind);
         if (err) {
             print_err_message(err);
         }   
+        cxl_kind = NULL;
     }
 
     // tear down mmap
-    if (munmap(mmap_start_point, cxl_current_size) == -1) {
-        fprintf(stderr, "tear down mmap fail\n");
-        exit(EXIT_FAILURE);
+    if (mmap_start_point != NULL && cxl_current_size != 0) {
+        if (munmap(mmap_start_point, cxl_current_size) == -1) {
+            fprintf(stderr, "tear down mmap fail\n");
+            exit(EXIT_FAILURE);
+        }
     }
-    close(cxl_fd);
+    mmap_start_point = NULL;
+    mmap_end_point = NULL;
+
+    if (cxl_fd >= 0) {
+        close(cxl_fd);
+        cxl_fd = -1;
+    }
+    cxl_initialized = 0;
 }
 
 // inline enum DEVICE_TYPE
@@ -105,7 +117,21 @@ enum DEVICE_TYPE stride_scheduler() {
 void 
 cxl_init(const size_t wanted_size, const int percentage) {   
     // if the cxl device is already initialized, return   
-    if (cxl_fd != 0) {
+    if (cxl_initialized) {
+        return;
+    }
+
+    percentage_on_cxl = 0;
+    if (percentage >= 100) {
+        percentage_on_cxl = 100;
+    } else if (percentage > 0) {
+        percentage_on_cxl = percentage;
+    }
+
+    if (percentage_on_cxl == 0) {
+        local_stride = 0;
+        cxl_stride = 1;
+        cxl_initialized = 1;
         return;
     }
 
@@ -135,12 +161,6 @@ cxl_init(const size_t wanted_size, const int percentage) {
         exit(EXIT_FAILURE);
     }
 
-    if (percentage >= 100) {
-        percentage_on_cxl = 100;
-    } else if (percentage > 0) {
-        percentage_on_cxl = percentage;
-    }
-
     // init the strides
     if (percentage_on_cxl == 100) {
         local_stride = 1;
@@ -161,6 +181,7 @@ cxl_init(const size_t wanted_size, const int percentage) {
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGABRT, &sa, NULL);
     sigaction(SIGKILL, &sa, NULL);
+    cxl_initialized = 1;
 }
 
 void* malloc_with_cxl(size_t size) {
@@ -205,7 +226,8 @@ void* calloc_with_cxl(size_t num, size_t size) {
 
 void* realloc_with_cxl(void *ptr, size_t new_size) {
     void *result = NULL;
-    if ((char *)ptr >= mmap_start_point && (char *)ptr < mmap_end_point) { 
+    if (cxl_kind != NULL && mmap_start_point != NULL &&
+        (char *)ptr >= mmap_start_point && (char *)ptr < mmap_end_point) { 
         result = memkind_realloc(cxl_kind, ptr, new_size);
     } else {
         result = realloc(ptr, new_size);
@@ -219,7 +241,8 @@ void* realloc_with_cxl(void *ptr, size_t new_size) {
 
 void free_with_cxl(void *ptr) {   
     // allocate in mmap area (cxl)
-    if ((char *)ptr >= mmap_start_point && (char *)ptr < mmap_end_point) {
+    if (cxl_kind != NULL && mmap_start_point != NULL &&
+        (char *)ptr >= mmap_start_point && (char *)ptr < mmap_end_point) {
         memkind_free(cxl_kind, ptr);
     } else {
         // allocate in heap
@@ -273,6 +296,10 @@ int posix_memalign_with_cxl(void **memptr, size_t alignment, size_t size) {
 }
 
 int malloc_on_cxl(size_t size, void **ptr) {
+    if (cxl_kind == NULL) {
+        *ptr = malloc(size);
+        return 0;
+    }
     *ptr = memkind_malloc(cxl_kind, size);
     if (*ptr != NULL) {
         return 1;
@@ -282,6 +309,10 @@ int malloc_on_cxl(size_t size, void **ptr) {
 }
 
 int calloc_on_cxl(size_t num, size_t size, void **ptr) {
+    if (cxl_kind == NULL) {
+        *ptr = calloc(num, size);
+        return 0;
+    }
     *ptr = memkind_calloc(cxl_kind, num, size);
     if (*ptr != NULL) {
         return 1;
@@ -291,6 +322,10 @@ int calloc_on_cxl(size_t num, size_t size, void **ptr) {
 }
 
 int mmap_on_cxl(void *addr, size_t length, int prot, int flags, int fd, off_t offset, void **ptr) {
+    if (cxl_fd < 0) {
+        *ptr = mmap(addr, length, prot, flags, fd, offset);
+        return 0;
+    }
     length = (length + CXL_MIN_SIZE - 1) / CXL_MIN_SIZE * CXL_MIN_SIZE;
     *ptr = mmap(addr, length, prot, flags | MAP_SHARED, cxl_fd, cxl_offset);
     atomic_fetch_add(&cxl_offset, length);
@@ -303,6 +338,9 @@ int mmap_on_cxl(void *addr, size_t length, int prot, int flags, int fd, off_t of
 }
 
 int posix_memalign_on_cxl(void **memptr, size_t alignment, size_t size) {
+    if (cxl_kind == NULL) {
+        return posix_memalign(memptr, alignment, size);
+    }
     int result = memkind_posix_memalign(cxl_kind, memptr, alignment, size);
     // printf("[DEBUG] posix_memalign_on_cxl, result: %p\n", *memptr);
     if (result != 0 && size != 0) {
@@ -316,4 +354,3 @@ void cxl_destroy()
 {
     exit_handler(0);
 }
-

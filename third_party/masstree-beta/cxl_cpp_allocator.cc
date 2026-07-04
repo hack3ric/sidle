@@ -4,9 +4,9 @@ void *
 operator new(std::size_t size)
 {
     #ifdef CXL
-    malloc_with_cxl(size);
+    return malloc_with_cxl(size);
     #else
-    ::operator new(size);
+    return ::operator new(size);
     #endif
 }
 
@@ -14,9 +14,9 @@ void *
 operator new[](std::size_t size)
 {
     #ifdef CXL
-    malloc_with_cxl(size);
+    return malloc_with_cxl(size);
     #else
-    ::operator new[](size);
+    return ::operator new[](size);
     #endif
 }
 

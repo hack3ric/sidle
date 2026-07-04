@@ -375,6 +375,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # add_compile_options(-O0 -g -Wall -Werror -fmax-errors=5)
 add_compile_options(-O3 -g -Wall -fmax-errors=5)
 
+find_library(SYSTEM_MEMKIND_LIBRARY memkind)
+
 ###############################################################################
 # includes
 ###############################################################################
@@ -387,6 +389,20 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/third_party/cxl_utils)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/third_party/masstree-beta/)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/third_party/art)
 add_definitions(-include ${CMAKE_CURRENT_SOURCE_DIR}/third_party/masstree-beta/config.h)
+
+if(SYSTEM_MEMKIND_LIBRARY)
+    add_library(memkind UNKNOWN IMPORTED)
+    set_target_properties(memkind PROPERTIES
+        IMPORTED_LOCATION "${SYSTEM_MEMKIND_LIBRARY}"
+    )
+else()
+    add_library(memkind STATIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/memkind_compat/memkind_compat.c
+    )
+    target_include_directories(memkind PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/memkind_compat
+    )
+endif()
 
 ###############################################################################
 # LIBJSON
@@ -405,6 +421,7 @@ add_library(LIBJSON
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/masstree-beta/straccum.cc
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/masstree-beta/string.cc
 )
+target_link_libraries(LIBJSON PUBLIC memkind)
 
 ###############################################################################
 # masstree_files
@@ -418,6 +435,27 @@ file(GLOB masstree_files
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/masstree-beta/value_string.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/masstree-beta/value_versioned_array.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/masstree-beta/string_slice.cc
+)
+
+add_library(sidle_pth_bm_masstree STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/kv/pth_bm_masstree.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/helper.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cxl_utils/cxl_allocator.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/masstree-beta/masstree.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sidle_utils/sidle_worker.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sidle_utils/sidle_frontend.cc
+)
+target_link_libraries(sidle_pth_bm_masstree
+    PUBLIC
+        LIBJSON
+        memkind
+        pthread
+)
+target_include_directories(sidle_pth_bm_masstree PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+set_target_properties(sidle_pth_bm_masstree PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
 )
 
 add_subdirectory(benchmark)
